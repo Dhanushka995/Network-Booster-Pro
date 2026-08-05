@@ -1,71 +1,62 @@
 using System;
-using System.Net;
+using System.Diagnostics;
+using System.Net.NetworkInformation;
 using System.Threading.Tasks;
 using System.Windows;
-using Titanium.Web.Proxy;
-using Titanium.Web.Proxy.EventArguments;
-using Titanium.Web.Proxy.Models;
 
 namespace NetworkBooster
 {
     public partial class MainWindow : Window
     {
-        private ProxyServer proxyServer;
-        private bool isRunning = false;
-
         public MainWindow()
         {
             InitializeComponent();
         }
 
-        private void Button_Click(object sender, RoutedEventArgs e)
+        private async void BtnFlushDns_Click(object sender, RoutedEventArgs e)
         {
-            if (!isRunning)
+            try
             {
-                StartProxy();
-                isRunning = true;
+                await Task.Run(() =>
+                {
+                    Process process = new Process();
+                    process.StartInfo.FileName = "ipconfig";
+                    process.StartInfo.Arguments = "/flushdns";
+                    process.StartInfo.UseShellExecute = false;
+                    process.StartInfo.CreateNoWindow = true;
+                    process.Start();
+                    process.WaitForExit();
+                });
+
+                MessageBox.Show("DNS Cache cleared successfully!", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
             }
-            else
+            catch (Exception ex)
             {
-                StopProxy();
-                isRunning = false;
-            }
-        }
-
-        private void StartProxy()
-        {
-            proxyServer = new ProxyServer();
-            
-            proxyServer.BeforeRequest += OnRequest;
-
-            var explicitEndPoint = new ExplicitProxyEndPoint(IPAddress.Any, 8000, true);
-            proxyServer.AddEndPoint(explicitEndPoint);
-            proxyServer.Start();
-
-            proxyServer.SetAsSystemHttpProxy(explicitEndPoint);
-            proxyServer.SetAsSystemHttpsProxy(explicitEndPoint);
-        }
-
-        private void StopProxy()
-        {
-            if (proxyServer != null)
-            {
-                proxyServer.Stop();
-                proxyServer.Dispose();
-                proxyServer = null;
+                MessageBox.Show($"Error clearing DNS: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
-        private async Task OnRequest(object sender, SessionEventArgs e)
+        private async void BtnPing_Click(object sender, RoutedEventArgs e)
         {
-            e.HttpClient.Request.Headers.RemoveHeader("Host");
-            e.HttpClient.Request.Headers.AddHeader("Host", "oneapp.hutch.lk");
-        }
-        
-        protected override void OnClosed(EventArgs e)
-        {
-            StopProxy();
-            base.OnClosed(e);
+            try
+            {
+                using (Ping ping = new Ping())
+                {
+                    PingReply reply = await ping.SendPingAsync("8.8.8.8");
+                    if (reply.Status == IPStatus.Success)
+                    {
+                        MessageBox.Show($"Ping successful! Latency: {reply.RoundtripTime} ms", "Ping Result", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
+                    else
+                    {
+                        MessageBox.Show($"Ping failed: {reply.Status}", "Ping Result", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ping Error: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
     }
 }
