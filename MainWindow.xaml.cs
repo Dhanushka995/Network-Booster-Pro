@@ -1,126 +1,71 @@
 using System;
-using System.Net.NetworkInformation;
-using System.Threading;
+using System.Net;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Media;
-using Microsoft.Win32;
+using Titanium.Web.Proxy;
+using Titanium.Web.Proxy.EventArguments;
+using Titanium.Web.Proxy.Models;
 
 namespace NetworkBooster
 {
     public partial class MainWindow : Window
     {
+        private ProxyServer proxyServer;
         private bool isRunning = false;
-        private CancellationTokenSource cts;
-        private const string AppName = "NetworkBoosterPro";
-        private const string RegPath = @"Software\NetworkBoosterPro";
 
         public MainWindow()
         {
             InitializeComponent();
-            LoadSettings();
         }
 
-        private async void ActionBtn_Click(object sender, RoutedEventArgs e)
+        private void Button_Click(object sender, RoutedEventArgs e)
         {
             if (!isRunning)
             {
-                string host = HostTextBox.Text.Trim();
-                if (string.IsNullOrEmpty(host)) return;
-
-                int interval = 10; 
-                if (IntervalComboBox.SelectedIndex == 0) interval = 5;
-                else if (IntervalComboBox.SelectedIndex == 1) interval = 10;
-                else if (IntervalComboBox.SelectedIndex == 2) interval = 15;
-
+                StartProxy();
                 isRunning = true;
-                ActionBtn.Content = "DISCONNECT";
-                ActionBtn.Background = (Brush)new BrushConverter().ConvertFrom("#C0392B"); 
-                StatusText.Text = $"Status: Pinging {host}...";
-                StatusText.Foreground = (Brush)new BrushConverter().ConvertFrom("#27AE60"); 
-
-                cts = new CancellationTokenSource();
-                SaveSettings(); 
-
-                await Task.Run(() => StartPinging(host, interval, cts.Token));
             }
             else
             {
+                StopProxy();
                 isRunning = false;
-                cts?.Cancel();
-                
-                ActionBtn.Content = "START";
-                ActionBtn.Background = (Brush)new BrushConverter().ConvertFrom("#27AE60"); 
-                StatusText.Text = "Status: Disconnected";
-                StatusText.Foreground = (Brush)new BrushConverter().ConvertFrom("#7F8C8D"); 
             }
         }
 
-        private void StartPinging(string host, int intervalSeconds, CancellationToken token)
+        private void StartProxy()
         {
-            Ping pingSender = new Ping();
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    pingSender.Send(host, 1000);
-                }
-                catch { }
+            proxyServer = new ProxyServer();
+            
+            proxyServer.BeforeRequest += OnRequest;
 
-                bool cancelled = token.WaitHandle.WaitOne(intervalSeconds * 1000);
-                if (cancelled) break;
+            var explicitEndPoint = new ExplicitProxyEndPoint(IPAddress.Any, 8000, true);
+            proxyServer.AddEndPoint(explicitEndPoint);
+            proxyServer.Start();
+
+            proxyServer.SetAsSystemHttpProxy(explicitEndPoint);
+            proxyServer.SetAsSystemHttpsProxy(explicitEndPoint);
+        }
+
+        private void StopProxy()
+        {
+            if (proxyServer != null)
+            {
+                proxyServer.Stop();
+                proxyServer.Dispose();
+                proxyServer = null;
             }
         }
 
-        private void AutoStartCheckBox_Click(object sender, RoutedEventArgs e)
+        private async Task OnRequest(object sender, SessionEventArgs e)
         {
-            try
-            {
-                RegistryKey rk = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-                if (AutoStartCheckBox.IsChecked == true)
-                {
-                    rk.SetValue(AppName, System.Reflection.Assembly.GetExecutingAssembly().Location);
-                }
-                else
-                {
-                    rk.DeleteValue(AppName, false);
-                }
-            }
-            catch { }
+            e.HttpClient.Request.Headers.RemoveHeader("Host");
+            e.HttpClient.Request.Headers.AddHeader("Host", "oneapp.hutch.lk");
         }
-
-        private void LoadSettings()
+        
+        protected override void OnClosed(EventArgs e)
         {
-            try
-            {
-                RegistryKey rk = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false);
-                if (rk != null && rk.GetValue(AppName) != null)
-                {
-                    AutoStartCheckBox.IsChecked = true;
-                }
-
-                RegistryKey settingsKey = Registry.CurrentUser.OpenSubKey(RegPath);
-                if (settingsKey != null)
-                {
-                    string savedHost = settingsKey.GetValue("Host") as string;
-                    if (!string.IsNullOrEmpty(savedHost)) HostTextBox.Text = savedHost;
-
-                    int savedInterval = (int)settingsKey.GetValue("IntervalIndex", 1);
-                    if (savedInterval >= 0 && savedInterval <= 2) IntervalComboBox.SelectedIndex = savedInterval;
-                }
-            }
-            catch { }
-        }
-
-        private void SaveSettings()
-        {
-            try
-            {
-                RegistryKey settingsKey = Registry.CurrentUser.CreateSubKey(RegPath);
-                settingsKey.SetValue("Host", HostTextBox.Text);
-                settingsKey.SetValue("IntervalIndex", IntervalComboBox.SelectedIndex);
-            }
-            catch { }
+            StopProxy();
+            base.OnClosed(e);
         }
     }
 }
