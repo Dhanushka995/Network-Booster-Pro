@@ -111,6 +111,8 @@ namespace NetworkBooster
                 {
                     registry.SetValue("ProxyEnable", 1);
                     registry.SetValue("ProxyServer", "127.0.0.1:8080");
+                    // මෙතනින් තමයි රවුටර් එකට (192.168.*) යන එක බයිපාස් කරන්නේ (404 Error එක හදන්න)
+                    registry.SetValue("ProxyOverride", "<local>;192.168.*;10.*;127.*");
                 }
                 else
                 {
@@ -192,6 +194,10 @@ namespace NetworkBooster
 
                     using (var targetClient = new TcpClient())
                     {
+                        // NoDelay දාන්නේ ඩේටා පැකට් එකතු කරන්නේ නැතුව ඉක්මනින් යවන්න (Fragmentation වලට අත්‍යවශ්‍යයි)
+                        targetClient.NoDelay = true;
+                        browserClient.NoDelay = true;
+
                         await targetClient.ConnectAsync(targetHost, targetPort);
                         using (var targetStream = targetClient.GetStream())
                         {
@@ -199,18 +205,57 @@ namespace NetworkBooster
                             {
                                 byte[] okResponse = Encoding.UTF8.GetBytes("HTTP/1.1 200 Connection Established\r\n\r\n");
                                 await browserStream.WriteAsync(okResponse, 0, okResponse.Length, token);
+
+                                // HTTPS සඳහා TCP Fragmentation (DPI Evasion) ක්‍රමය භාවිතා කිරීම
+                                var task1 = CopyWithFragmentationAsync(browserStream, targetStream, token);
+                                var task2 = targetStream.CopyToAsync(browserStream, 8192, token);
+                                await Task.WhenAny(task1, task2);
                             }
                             else
                             {
                                 requestHeader = Regex.Replace(requestHeader, @"Host:\s*([^\r\n]+)", $"Host: {spoofHost}");
                                 byte[] modifiedRequest = Encoding.UTF8.GetBytes(requestHeader);
                                 await targetStream.WriteAsync(modifiedRequest, 0, modifiedRequest.Length, token);
-                            }
 
-                            var task1 = browserStream.CopyToAsync(targetStream, 8192, token);
-                            var task2 = targetStream.CopyToAsync(browserStream, 8192, token);
-                            await Task.WhenAny(task1, task2);
+                                var task1 = browserStream.CopyToAsync(targetStream, 8192, token);
+                                var task2 = targetStream.CopyToAsync(browserStream, 8192, token);
+                                await Task.WhenAny(task1, task2);
+                            }
                         }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // මේක තමයි අලුතින් එකතු කරපු සුපිරිම කෑල්ල (DPI Firewall එක රවට්ටන තැන)
+        private async Task CopyWithFragmentationAsync(NetworkStream input, NetworkStream output, CancellationToken token)
+        {
+            byte[] buffer = new byte[8192];
+            bool isFirstPacket = true;
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    int bytesRead = await input.ReadAsync(buffer, 0, buffer.Length, token);
+                    if (bytesRead == 0) break;
+
+                    if (isFirstPacket)
+                    {
+                        // පළවෙනි පැකට් එක (Client Hello) බයිට් 2න් 2ට කඩලා යවනවා
+                        int chunkSize = 2; 
+                        for (int i = 0; i < bytesRead; i += chunkSize)
+                        {
+                            int currentChunkSize = Math.Min(chunkSize, bytesRead - i);
+                            await output.WriteAsync(buffer, i, currentChunkSize, token);
+                            await output.FlushAsync(token);
+                            await Task.Delay(5, token); // පොඩි වෙලාවක් තියනවා පැකට් වෙන් වෙලා යන්න
+                        }
+                        isFirstPacket = false;
+                    }
+                    else
+                    {
+                        await output.WriteAsync(buffer, 0, bytesRead, token);
                     }
                 }
             }
