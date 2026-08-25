@@ -14,9 +14,10 @@ namespace NetworkBooster
     public partial class MainWindow : Window
     {
         // ── Constants ──────────────────────────────────────────────────────────
-        private const string APP_NAME   = "NetworkBoosterPro";
-        private const string REG_PATH   = @"Software\NetworkBoosterPro";
+        private const string APP_NAME    = "NetworkBoosterPro";
+        private const string REG_PATH    = @"Software\NetworkBoosterPro";
         private const int    TARGET_PORT = 443;
+        private const string DEFAULT_PATH = "/hutch_2_0/";   // ← New path
 
         private readonly int[] _intervals = { 5, 10, 15, 30 }; // seconds
 
@@ -108,16 +109,41 @@ namespace NetworkBooster
         {
             if (!_isRunning)
             {
-                string host = HostTextBox.Text.Trim();
+                string input = HostTextBox.Text.Trim();
 
-                if (string.IsNullOrEmpty(host))
+                if (string.IsNullOrEmpty(input))
                 {
                     SetStatus("Please enter a valid host!", "#EF4444");
                     return;
                 }
 
+                // Parse host and path from input
+                string host, path;
+                if (input.Contains("://"))
+                {
+                    // Full URL e.g. https://oneapp.hutch.lk/hutch_2_0/
+                    var uri = new Uri(input);
+                    host = uri.Host;
+                    path = uri.AbsolutePath;
+                    if (string.IsNullOrEmpty(path)) path = "/";
+                }
+                else if (input.Contains("/"))
+                {
+                    // e.g. oneapp.hutch.lk/hutch_2_0/
+                    int idx = input.IndexOf('/');
+                    host = input.Substring(0, idx);
+                    path = input.Substring(idx);
+                    if (string.IsNullOrEmpty(path)) path = "/";
+                }
+                else
+                {
+                    // just hostname e.g. oneapp.hutch.lk
+                    host = input;
+                    path = DEFAULT_PATH;
+                }
+
                 SaveSettings();
-                _ = StartConnectionLoop(host);   // fire-and-forget, UI stays responsive
+                _ = StartConnectionLoop(host, path);   // fire-and-forget
             }
             else
             {
@@ -130,7 +156,7 @@ namespace NetworkBooster
         //  Connection Loop  (reconnects automatically on any failure)
         // ══════════════════════════════════════════════════════════════════════
 
-        private async Task StartConnectionLoop(string host)
+        private async Task StartConnectionLoop(string host, string path)
         {
             _cts              = new CancellationTokenSource();
             var token         = _cts.Token;
@@ -151,7 +177,7 @@ namespace NetworkBooster
 
                 try
                 {
-                    await ConnectAndKeepaliveAsync(host, token);
+                    await ConnectAndKeepaliveAsync(host, path, token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -159,11 +185,10 @@ namespace NetworkBooster
                 }
                 catch (Exception ex)
                 {
-                    // Network error — show message, wait 5 s, retry
                     Dispatcher.Invoke(() =>
                     {
                         SetStatus($"Error — {ex.Message}", "#EF4444");
-                        ActionBtn.IsEnabled = true;   // allow user to disconnect manually
+                        ActionBtn.IsEnabled = true;
                     });
 
                     try   { await Task.Delay(5_000, token); }
@@ -176,27 +201,17 @@ namespace NetworkBooster
 
         // ══════════════════════════════════════════════════════════════════════
         //  Core: TLS Connect + Keepalive Loop
-        //
-        //  How it works:
-        //    1. TCP connect to oneapp.hutch.lk:443
-        //    2. TLS handshake (SSL/TLS layer)
-        //    3. Send HTTP GET request every N seconds to keep connection alive
-        //    4. Hutch network sees active TLS session → removes speed throttle
-        //    5. All browser traffic (YouTube etc.) gets full speed automatically
         // ══════════════════════════════════════════════════════════════════════
 
-        private async Task ConnectAndKeepaliveAsync(string host, CancellationToken token)
+        private async Task ConnectAndKeepaliveAsync(string host, string path, CancellationToken token)
         {
             // ── Step 1: TCP Connect ─────────────────────────────────────────
             Dispatcher.Invoke(() => SetStatus($"Connecting to {host}...", "#F59E0B"));
 
             using var tcp = new TcpClient();
-
-            // TCP-level keepalive so the OS keeps the socket alive between our requests
             tcp.Client.SetSocketOption(SocketOptionLevel.Socket,
                                        SocketOptionName.KeepAlive, true);
 
-            // 15-second timeout for initial connection
             using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(token);
             connectCts.CancelAfter(15_000);
 
@@ -205,7 +220,6 @@ namespace NetworkBooster
             // ── Step 2: TLS Handshake ───────────────────────────────────────
             Dispatcher.Invoke(() => SetStatus("Securing connection (TLS)...", "#F59E0B"));
 
-            // Accept Hutch's server cert (avoid app crashing on cert issues)
             using var ssl = new SslStream(tcp.GetStream(), false,
                                           (_, _, _, _) => true);
 
@@ -224,14 +238,13 @@ namespace NetworkBooster
                 ActionBtn.IsEnabled = true;
             });
 
-            // HTTP keepalive request template
-            // User-Agent mimics the Hutch OneApp so the server responds normally
+            // HTTP keepalive request template using path
             string httpRequest =
-                $"GET / HTTP/1.1\r\n"                    +
-                $"Host: {host}\r\n"                      +
-                $"Connection: keep-alive\r\n"            +
-                $"User-Agent: HutchOneApp/3.0 Android\r\n" +
-                $"Accept: */*\r\n"                       +
+                $"GET {path} HTTP/1.1\r\n"                  +
+                $"Host: {host}\r\n"                         +
+                $"Connection: keep-alive\r\n"               +
+                $"User-Agent: HutchOneApp/3.0 Android\r\n"  +
+                $"Accept: */*\r\n"                          +
                 $"\r\n";
 
             byte[] requestBytes  = Encoding.UTF8.GetBytes(httpRequest);
@@ -240,16 +253,12 @@ namespace NetworkBooster
             // ── Step 4: Keepalive Loop ──────────────────────────────────────
             while (!token.IsCancellationRequested && tcp.Connected)
             {
-                // Send HTTP request to keep TLS session alive
                 await ssl.WriteAsync(requestBytes, 0, requestBytes.Length, token);
                 await ssl.FlushAsync(token);
 
                 _totalBytesSent += requestBytes.Length;
                 Dispatcher.Invoke(UpdateBytesLabel);
 
-                // Drain the server response (read up to 3 s)
-                // We don't use the response — we just need to empty the buffer
-                // so the server doesn't close the connection
                 try
                 {
                     using var readCts =
@@ -261,7 +270,6 @@ namespace NetworkBooster
 
                     if (bytesRead == 0)
                     {
-                        // Server closed the connection cleanly — force reconnect
                         throw new IOException("Server closed connection.");
                     }
                 }
@@ -270,7 +278,6 @@ namespace NetworkBooster
                     // Read timeout is fine — server is just silent
                 }
 
-                // Wait for next keepalive cycle
                 int interval = GetSelectedInterval() * 1_000;
                 await Task.Delay(interval, token);
             }
@@ -282,8 +289,7 @@ namespace NetworkBooster
 
         private void StopConnection()
         {
-            try { _cts?.Cancel(); }
-            catch { /* ignore */ }
+            try { _cts?.Cancel(); } catch { /* ignore */ }
         }
 
         // ══════════════════════════════════════════════════════════════════════
@@ -381,12 +387,10 @@ namespace NetworkBooster
         {
             try
             {
-                // Auto-start checkbox state
                 const string runKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
                 using RegistryKey? run = Registry.CurrentUser.OpenSubKey(runKey);
                 AutoStartCheckBox.IsChecked = run?.GetValue(APP_NAME) != null;
 
-                // Host + interval
                 using RegistryKey? s = Registry.CurrentUser.OpenSubKey(REG_PATH);
                 if (s != null)
                 {
