@@ -34,7 +34,7 @@
             <!-- ══ Host Label ══ -->
             <TextBlock Grid.Row="1" Text="TARGET HOST"
                        Foreground="#64748B" FontSize="10" FontWeight="Bold"
-                       LetterSpacing="1.5" Margin="2,0,0,6"/>
+                       Margin="2,0,0,6"/>
 
             <!-- ══ Host TextBox ══ -->
             <Border Grid.Row="2" Background="#1E293B" CornerRadius="8"
@@ -50,7 +50,7 @@
             <!-- ══ Interval Label ══ -->
             <TextBlock Grid.Row="3" Text="KEEP-ALIVE INTERVAL"
                        Foreground="#64748B" FontSize="10" FontWeight="Bold"
-                       LetterSpacing="1.5" Margin="2,0,0,6"/>
+                       Margin="2,0,0,6"/>
 
             <!-- ══ Interval ComboBox ══ -->
             <Border Grid.Row="4" Background="#1E293B" CornerRadius="8"
