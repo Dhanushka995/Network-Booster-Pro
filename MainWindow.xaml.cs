@@ -1,5 +1,5 @@
 using System;
-using System.IO;                  // ← Added for IOException
+using System.IO;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -14,25 +14,19 @@ namespace NetworkBooster
 {
     public partial class MainWindow : Window
     {
-        // ── Constants ──────────────────────────────────────────────────────────
         private const string APP_NAME    = "NetworkBoosterPro";
         private const string REG_PATH    = @"Software\NetworkBoosterPro";
         private const int    TARGET_PORT = 443;
-        private const string DEFAULT_PATH = "/hutch_2_0/";   // New path
+        private const string DEFAULT_PATH = "/hutch_2_0/";
 
-        private readonly int[] _intervals = { 5, 10, 15, 30 }; // seconds
+        private readonly int[] _intervals = { 5, 10, 15, 30 };
 
-        // ── State ──────────────────────────────────────────────────────────────
         private bool   _isRunning = false;
         private long   _totalBytesSent = 0;
         private int    _reconnectAttempts = 0;
 
-        private CancellationTokenSource      _cts;
-        private System.Windows.Forms.NotifyIcon _trayIcon;
-
-        // ══════════════════════════════════════════════════════════════════════
-        //  Init
-        // ══════════════════════════════════════════════════════════════════════
+        private CancellationTokenSource? _cts;
+        private System.Windows.Forms.NotifyIcon? _trayIcon;
 
         public MainWindow()
         {
@@ -40,10 +34,6 @@ namespace NetworkBooster
             SetupTrayIcon();
             LoadSettings();
         }
-
-        // ══════════════════════════════════════════════════════════════════════
-        //  Tray Icon
-        // ══════════════════════════════════════════════════════════════════════
 
         private void SetupTrayIcon()
         {
@@ -55,9 +45,9 @@ namespace NetworkBooster
             };
 
             var menu = new System.Windows.Forms.ContextMenuStrip();
-            menu.Items.Add("Open",  null, (s, e) => ShowMainWindow());
+            menu.Items.Add("Open", null, (s, e) => ShowMainWindow());
             menu.Items.Add("-");
-            menu.Items.Add("Exit",  null, (s, e) =>
+            menu.Items.Add("Exit", null, (s, e) =>
             {
                 StopConnection();
                 Application.Current.Shutdown();
@@ -72,27 +62,24 @@ namespace NetworkBooster
             Show();
             WindowState = WindowState.Normal;
             Activate();
-            _trayIcon.Visible = false;
+            if (_trayIcon != null) _trayIcon.Visible = false;
         }
-
-        // ══════════════════════════════════════════════════════════════════════
-        //  Window Events
-        // ══════════════════════════════════════════════════════════════════════
 
         private void Window_StateChanged(object sender, EventArgs e)
         {
             if (WindowState == WindowState.Minimized)
             {
                 Hide();
-                _trayIcon.Visible = true;
-                _trayIcon.ShowBalloonTip(
-                    2000,
-                    "Network Booster Pro",
-                    _isRunning
-                        ? "Running — your connection is being boosted!"
-                        : "Running in background.",
-                    System.Windows.Forms.ToolTipIcon.Info
-                );
+                if (_trayIcon != null)
+                {
+                    _trayIcon.Visible = true;
+                    _trayIcon.ShowBalloonTip(
+                        2000,
+                        "Network Booster Pro",
+                        _isRunning ? "Running — your connection is being boosted!" : "Running in background.",
+                        System.Windows.Forms.ToolTipIcon.Info
+                    );
+                }
             }
         }
 
@@ -101,10 +88,6 @@ namespace NetworkBooster
             StopConnection();
             _trayIcon?.Dispose();
         }
-
-        // ══════════════════════════════════════════════════════════════════════
-        //  Button Click
-        // ══════════════════════════════════════════════════════════════════════
 
         private void ActionBtn_Click(object sender, RoutedEventArgs e)
         {
@@ -118,11 +101,9 @@ namespace NetworkBooster
                     return;
                 }
 
-                // Parse host and path from input
                 string host, path;
                 if (input.Contains("://"))
                 {
-                    // Full URL e.g. https://oneapp.hutch.lk/hutch_2_0/
                     var uri = new Uri(input);
                     host = uri.Host;
                     path = uri.AbsolutePath;
@@ -130,7 +111,6 @@ namespace NetworkBooster
                 }
                 else if (input.Contains("/"))
                 {
-                    // e.g. oneapp.hutch.lk/hutch_2_0/
                     int idx = input.IndexOf('/');
                     host = input.Substring(0, idx);
                     path = input.Substring(idx);
@@ -138,13 +118,12 @@ namespace NetworkBooster
                 }
                 else
                 {
-                    // just hostname e.g. oneapp.hutch.lk
                     host = input;
                     path = DEFAULT_PATH;
                 }
 
                 SaveSettings();
-                _ = StartConnectionLoop(host, path);   // fire-and-forget
+                _ = StartConnectionLoop(host, path);
             }
             else
             {
@@ -153,16 +132,12 @@ namespace NetworkBooster
             }
         }
 
-        // ══════════════════════════════════════════════════════════════════════
-        //  Connection Loop  (reconnects automatically on any failure)
-        // ══════════════════════════════════════════════════════════════════════
-
         private async Task StartConnectionLoop(string host, string path)
         {
-            _cts              = new CancellationTokenSource();
-            var token         = _cts.Token;
+            _cts = new CancellationTokenSource();
+            var token = _cts.Token;
             _reconnectAttempts = 0;
-            _totalBytesSent   = 0;
+            _totalBytesSent = 0;
 
             SetUIConnecting();
 
@@ -182,7 +157,7 @@ namespace NetworkBooster
                 }
                 catch (OperationCanceledException)
                 {
-                    break;   // User pressed Disconnect — clean exit
+                    break;
                 }
                 catch (Exception ex)
                 {
@@ -192,7 +167,7 @@ namespace NetworkBooster
                         ActionBtn.IsEnabled = true;
                     });
 
-                    try   { await Task.Delay(5_000, token); }
+                    try { await Task.Delay(5_000, token); }
                     catch (OperationCanceledException) { break; }
                 }
             }
@@ -200,38 +175,29 @@ namespace NetworkBooster
             Dispatcher.Invoke(SetUIDisconnected);
         }
 
-        // ══════════════════════════════════════════════════════════════════════
-        //  Core: TLS Connect + Keepalive Loop
-        // ══════════════════════════════════════════════════════════════════════
-
         private async Task ConnectAndKeepaliveAsync(string host, string path, CancellationToken token)
         {
-            // ── Step 1: TCP Connect ─────────────────────────────────────────
             Dispatcher.Invoke(() => SetStatus($"Connecting to {host}...", "#F59E0B"));
 
             using var tcp = new TcpClient();
-            tcp.Client.SetSocketOption(SocketOptionLevel.Socket,
-                                       SocketOptionName.KeepAlive, true);
+            tcp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
 
             using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(token);
             connectCts.CancelAfter(15_000);
 
             await tcp.ConnectAsync(host, TARGET_PORT, connectCts.Token);
 
-            // ── Step 2: TLS Handshake ───────────────────────────────────────
             Dispatcher.Invoke(() => SetStatus("Securing connection (TLS)...", "#F59E0B"));
 
-            using var ssl = new SslStream(tcp.GetStream(), false,
-                                          (_, _, _, _) => true);
+            using var ssl = new SslStream(tcp.GetStream(), false, (_, _, _, _) => true);
 
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
             {
-                TargetHost             = host,
-                EnabledSslProtocols    = SslProtocols.Tls12 | SslProtocols.Tls13,
+                TargetHost = host,
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                 RemoteCertificateValidationCallback = (_, _, _, _) => true
             }, token);
 
-            // ── Step 3: Connected! Update UI ────────────────────────────────
             _reconnectAttempts = 0;
             Dispatcher.Invoke(() =>
             {
@@ -239,19 +205,17 @@ namespace NetworkBooster
                 ActionBtn.IsEnabled = true;
             });
 
-            // HTTP keepalive request template using path
             string httpRequest =
-                $"GET {path} HTTP/1.1\r\n"                  +
-                $"Host: {host}\r\n"                         +
-                $"Connection: keep-alive\r\n"               +
-                $"User-Agent: HutchOneApp/3.0 Android\r\n"  +
-                $"Accept: */*\r\n"                          +
+                $"GET {path} HTTP/1.1\r\n" +
+                $"Host: {host}\r\n" +
+                $"Connection: keep-alive\r\n" +
+                $"User-Agent: HutchOneApp/3.0 Android\r\n" +
+                $"Accept: */*\r\n" +
                 $"\r\n";
 
-            byte[] requestBytes  = Encoding.UTF8.GetBytes(httpRequest);
+            byte[] requestBytes = Encoding.UTF8.GetBytes(httpRequest);
             byte[] responseBuffer = new byte[8192];
 
-            // ── Step 4: Keepalive Loop ──────────────────────────────────────
             while (!token.IsCancellationRequested && tcp.Connected)
             {
                 await ssl.WriteAsync(requestBytes, 0, requestBytes.Length, token);
@@ -262,12 +226,10 @@ namespace NetworkBooster
 
                 try
                 {
-                    using var readCts =
-                        CancellationTokenSource.CreateLinkedTokenSource(token);
+                    using var readCts = CancellationTokenSource.CreateLinkedTokenSource(token);
                     readCts.CancelAfter(3_000);
 
-                    int bytesRead = await ssl.ReadAsync(
-                        responseBuffer, 0, responseBuffer.Length, readCts.Token);
+                    int bytesRead = await ssl.ReadAsync(responseBuffer, 0, responseBuffer.Length, readCts.Token);
 
                     if (bytesRead == 0)
                     {
@@ -276,7 +238,7 @@ namespace NetworkBooster
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    // Read timeout is fine — server is just silent
+                    // Read timeout is fine
                 }
 
                 int interval = GetSelectedInterval() * 1_000;
@@ -284,26 +246,18 @@ namespace NetworkBooster
             }
         }
 
-        // ══════════════════════════════════════════════════════════════════════
-        //  Stop
-        // ══════════════════════════════════════════════════════════════════════
-
         private void StopConnection()
         {
-            try { _cts?.Cancel(); } catch { /* ignore */ }
+            try { _cts?.Cancel(); } catch { }
         }
-
-        // ══════════════════════════════════════════════════════════════════════
-        //  UI State Helpers
-        // ══════════════════════════════════════════════════════════════════════
 
         private void SetUIConnecting()
         {
-            _isRunning              = true;
-            ActionBtn.IsEnabled     = false;
-            ActionBtn.Content       = "Connecting...";
-            ActionBtn.Background    = MakeBrush("#F59E0B");
-            HostTextBox.IsEnabled   = false;
+            _isRunning = true;
+            ActionBtn.IsEnabled = false;
+            ActionBtn.Content = "Connecting...";
+            ActionBtn.Background = MakeBrush("#F59E0B");
+            HostTextBox.IsEnabled = false;
             IntervalCombo.IsEnabled = false;
             LoadIndicator.Visibility = Visibility.Visible;
             SetStatus("Connecting...", "#F59E0B");
@@ -311,27 +265,27 @@ namespace NetworkBooster
 
         private void SetUIConnected(string host)
         {
-            ActionBtn.Content    = "DISCONNECT";
+            ActionBtn.Content = "DISCONNECT";
             ActionBtn.Background = MakeBrush("#DC2626");
             SetStatus($"Connected → {host}", "#22C55E");
         }
 
         private void SetUIDisconnected()
         {
-            _isRunning              = false;
-            ActionBtn.IsEnabled     = true;
-            ActionBtn.Content       = "START";
-            ActionBtn.Background    = MakeBrush("#16A34A");
-            HostTextBox.IsEnabled   = true;
+            _isRunning = false;
+            ActionBtn.IsEnabled = true;
+            ActionBtn.Content = "START";
+            ActionBtn.Background = MakeBrush("#16A34A");
+            HostTextBox.IsEnabled = true;
             IntervalCombo.IsEnabled = true;
             LoadIndicator.Visibility = Visibility.Hidden;
             SetStatus("Disconnected", "#64748B");
-            BytesLabel.Text         = "Data Sent: —";
+            BytesLabel.Text = "Data Sent: —";
         }
 
         private void SetStatus(string message, string hexColor)
         {
-            StatusText.Text       = $"Status: {message}";
+            StatusText.Text = $"Status: {message}";
             StatusText.Foreground = MakeBrush(hexColor);
         }
 
@@ -355,21 +309,17 @@ namespace NetworkBooster
         private static SolidColorBrush MakeBrush(string hex) =>
             (SolidColorBrush)new BrushConverter().ConvertFrom(hex)!;
 
-        // ══════════════════════════════════════════════════════════════════════
-        //  Auto-Start (Windows Registry)
-        // ══════════════════════════════════════════════════════════════════════
-
         private void AutoStartCheckBox_Click(object sender, RoutedEventArgs e)
         {
             try
             {
                 const string runKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-                using RegistryKey rk = Registry.CurrentUser.OpenSubKey(runKey, true)!;
+                using RegistryKey? rk = Registry.CurrentUser.OpenSubKey(runKey, true);
+                if (rk == null) return;
 
                 if (AutoStartCheckBox.IsChecked == true)
                 {
-                    string exe = System.Diagnostics.Process
-                        .GetCurrentProcess().MainModule!.FileName;
+                    string exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
                     rk.SetValue(APP_NAME, exe);
                 }
                 else
@@ -377,12 +327,8 @@ namespace NetworkBooster
                     rk.DeleteValue(APP_NAME, false);
                 }
             }
-            catch { /* Registry access failed — non-critical */ }
+            catch { }
         }
-
-        // ══════════════════════════════════════════════════════════════════════
-        //  Settings  (saved to Registry)
-        // ══════════════════════════════════════════════════════════════════════
 
         private void LoadSettings()
         {
@@ -405,7 +351,7 @@ namespace NetworkBooster
             }
             catch
             {
-                IntervalCombo.SelectedIndex = 1;   // default: 10 seconds
+                IntervalCombo.SelectedIndex = 1;
             }
         }
 
@@ -413,8 +359,9 @@ namespace NetworkBooster
         {
             try
             {
-                using RegistryKey s = Registry.CurrentUser.CreateSubKey(REG_PATH);
-                s.SetValue("Host",     HostTextBox.Text);
+                using RegistryKey? s = Registry.CurrentUser.CreateSubKey(REG_PATH);
+                if (s == null) return;
+                s.SetValue("Host", HostTextBox.Text);
                 s.SetValue("Interval", IntervalCombo.SelectedIndex);
             }
             catch { }
