@@ -1,4 +1,5 @@
 using System;
+using System.IO;                  // ← Added for IOException
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -17,7 +18,7 @@ namespace NetworkBooster
         private const string APP_NAME    = "NetworkBoosterPro";
         private const string REG_PATH    = @"Software\NetworkBoosterPro";
         private const int    TARGET_PORT = 443;
-        private const string DEFAULT_PATH = "/hutch_2_0/";   // ← New path
+        private const string DEFAULT_PATH = "/hutch_2_0/";   // New path
 
         private readonly int[] _intervals = { 5, 10, 15, 30 }; // seconds
 
