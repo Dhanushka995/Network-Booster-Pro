@@ -189,7 +189,8 @@ namespace NetworkBooster
 
             Dispatcher.Invoke(() => SetStatus("Securing connection (TLS)...", "#F59E0B"));
 
-            using var ssl = new SslStream(tcp.GetStream(), false, (_, _, _, _) => true);
+            // FIX: Remove callback from constructor, keep only in options
+            using var ssl = new SslStream(tcp.GetStream(), false);
 
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
             {
