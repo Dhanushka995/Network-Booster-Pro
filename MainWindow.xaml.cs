@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -14,24 +16,17 @@ namespace NetworkBooster
 {
     public partial class MainWindow : Window
     {
-        private const string APP_NAME    = "NetworkBoosterPro";
-        private const string REG_PATH    = @"Software\NetworkBoosterPro";
-        private const int    TARGET_PORT = 443;
+        private const string APP_NAME = "NetworkBoosterPro";
+        private const string REG_PATH = @"Software\NetworkBoosterPro";
+        private const int PROXY_PORT = 8080;
 
-        // Possible endpoints to try (order matters: base first, then dashboard)
-        private readonly string[] _endpoints = new string[]
+        private readonly string[] _throttledHosts = new string[]
         {
-            "/hutch_2_0/",
-            "/hutch_2_0/capp/Dashboard/getConnectionDetails",
-            "/hutch_2_0/capp/Dashboard/readDashboardData"
+            "youtube.com", "www.youtube.com", "googlevideo.com", "ytimg.com",
+            "netflix.com", "facebook.com", "twitter.com", "instagram.com"
         };
 
-        private readonly int[] _intervals = { 5, 10, 15, 30 };
-
-        private bool   _isRunning = false;
-        private long   _totalBytesSent = 0;
-        private int    _reconnectAttempts = 0;
-
+        private bool _isRunning = false;
         private CancellationTokenSource? _cts;
         private System.Windows.Forms.NotifyIcon? _trayIcon;
 
@@ -46,20 +41,14 @@ namespace NetworkBooster
         {
             _trayIcon = new System.Windows.Forms.NotifyIcon
             {
-                Icon    = System.Drawing.SystemIcons.Shield,
-                Text    = "Network Booster Pro",
+                Icon = System.Drawing.SystemIcons.Shield,
+                Text = "Network Booster Pro",
                 Visible = false
             };
-
             var menu = new System.Windows.Forms.ContextMenuStrip();
             menu.Items.Add("Open", null, (s, e) => ShowMainWindow());
             menu.Items.Add("-");
-            menu.Items.Add("Exit", null, (s, e) =>
-            {
-                StopConnection();
-                Application.Current.Shutdown();
-            });
-
+            menu.Items.Add("Exit", null, (s, e) => { StopProxy(); Application.Current.Shutdown(); });
             _trayIcon.ContextMenuStrip = menu;
             _trayIcon.DoubleClick += (s, e) => ShowMainWindow();
         }
@@ -80,238 +69,227 @@ namespace NetworkBooster
                 if (_trayIcon != null)
                 {
                     _trayIcon.Visible = true;
-                    _trayIcon.ShowBalloonTip(
-                        2000,
-                        "Network Booster Pro",
-                        _isRunning ? "Running — your connection is being boosted!" : "Running in background.",
-                        System.Windows.Forms.ToolTipIcon.Info
-                    );
+                    _trayIcon.ShowBalloonTip(2000, "Network Booster Pro",
+                        _isRunning ? "Proxy running — SNI splitting active!" : "Running in background.",
+                        System.Windows.Forms.ToolTipIcon.Info);
                 }
             }
         }
 
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
-            StopConnection();
+            StopProxy();
             _trayIcon?.Dispose();
         }
 
-        private void ActionBtn_Click(object sender, RoutedEventArgs e)
+        private async void ActionBtn_Click(object sender, RoutedEventArgs e)
         {
             if (!_isRunning)
             {
-                string input = HostTextBox.Text.Trim();
-                if (string.IsNullOrEmpty(input))
+                _cts = new CancellationTokenSource();
+                _isRunning = true;
+                SetUIConnecting();
+                try
                 {
-                    SetStatus("Please enter a valid host!", "#EF4444");
-                    return;
+                    SetWindowsProxy(true);
+                    await Task.Run(() => StartProxyServer(_cts.Token));
+                    SetUIConnected("SNI Splitting Proxy");
                 }
-
-                // We'll ignore path input now; use our endpoint list
-                string host = input.Contains("://") ? new Uri(input).Host : input.Split('/')[0];
-
-                SaveSettings();
-                _ = StartConnectionLoop(host);
+                catch (Exception ex)
+                {
+                    SetStatus($"Error: {ex.Message}", "#EF4444");
+                    _isRunning = false;
+                    SetUIDisconnected();
+                }
             }
             else
             {
-                StopConnection();
+                StopProxy();
                 SetUIDisconnected();
             }
         }
 
-        private async Task StartConnectionLoop(string host)
+        private void StartProxyServer(CancellationToken token)
         {
-            _cts = new CancellationTokenSource();
-            var token = _cts.Token;
-            _reconnectAttempts = 0;
-            _totalBytesSent = 0;
-
-            SetUIConnecting();
-
+            TcpListener listener = new TcpListener(IPAddress.Loopback, PROXY_PORT);
+            listener.Start();
             while (!token.IsCancellationRequested)
             {
-                _reconnectAttempts++;
-
-                if (_reconnectAttempts > 1)
-                {
-                    Dispatcher.Invoke(() =>
-                        SetStatus($"Reconnecting... (Attempt #{_reconnectAttempts})", "#F59E0B"));
-                }
-
-                try
-                {
-                    // Try each endpoint in order, first one that works wins
-                    string? workingPath = null;
-                    foreach (var path in _endpoints)
-                    {
-                        if (token.IsCancellationRequested) break;
-                        try
-                        {
-                            Dispatcher.Invoke(() => SetStatus($"Trying {path}...", "#F59E0B"));
-                            await ConnectAndKeepaliveAsync(host, path, token);
-                            // If ConnectAndKeepaliveAsync returns normally, server closed connection; try next
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            throw; // user cancelled
-                        }
-                        catch (Exception ex)
-                        {
-                            Dispatcher.Invoke(() => SetStatus($"Failed {path}: {ex.Message}", "#EF4444"));
-                            continue; // try next endpoint
-                        }
-                    }
-
-                    // If no endpoint worked, wait and retry all again
-                    if (workingPath == null)
-                    {
-                        Dispatcher.Invoke(() => SetStatus("No endpoint worked, retrying...", "#F59E0B"));
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() =>
-                    {
-                        SetStatus($"Error — {ex.Message}", "#EF4444");
-                        ActionBtn.IsEnabled = true;
-                    });
-                }
-
-                try { await Task.Delay(5_000, token); }
-                catch (OperationCanceledException) { break; }
+                TcpClient client = listener.AcceptTcpClient();
+                _ = Task.Run(() => HandleClient(client, token), token);
             }
-
-            Dispatcher.Invoke(SetUIDisconnected);
+            listener.Stop();
         }
 
-        private async Task ConnectAndKeepaliveAsync(string host, string path, CancellationToken token)
+        private async Task HandleClient(TcpClient client, CancellationToken token)
         {
-            using var tcp = new TcpClient();
-            tcp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-
-            using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-            connectCts.CancelAfter(15_000);
-            await tcp.ConnectAsync(host, TARGET_PORT, connectCts.Token);
-
-            using var ssl = new SslStream(tcp.GetStream(), false);
-            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            using (client)
             {
-                TargetHost = host,
-                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-                RemoteCertificateValidationCallback = (_, _, _, _) => true
-            }, token);
+                NetworkStream clientStream = client.GetStream();
+                // Read initial request (CONNECT or plain HTTP)
+                byte[] buffer = new byte[8192];
+                int bytesRead = await clientStream.ReadAsync(buffer, 0, buffer.Length, token);
+                if (bytesRead <= 0) return;
 
-            // Build request; if path contains "Dashboard" use POST with empty JSON, else GET
-            bool isPost = path.Contains("Dashboard");
-            string method = isPost ? "POST" : "GET";
-            string requestBody = isPost ? "{}" : "";
-            string httpRequest = $"{method} {path} HTTP/1.1\r\n" +
-                                 $"Host: {host}\r\n" +
-                                 $"Connection: keep-alive\r\n" +
-                                 $"User-Agent: HutchOneApp/3.0 Android\r\n" +
-                                 $"Accept: */*\r\n" +
-                                 (isPost ? $"Content-Type: application/json\r\nContent-Length: {Encoding.UTF8.GetByteCount(requestBody)}\r\n" : "") +
-                                 $"\r\n" + requestBody;
+                string request = Encoding.ASCII.GetString(buffer, 0, bytesRead);
+                string[] lines = request.Split(new[] { "\r\n" }, StringSplitOptions.None);
+                if (lines.Length == 0) return;
 
-            byte[] requestBytes = Encoding.UTF8.GetBytes(httpRequest);
-            byte[] responseBuffer = new byte[8192];
+                string[] parts = lines[0].Split(' ');
+                if (parts.Length < 2) return;
 
-            // Send first request
-            await ssl.WriteAsync(requestBytes, 0, requestBytes.Length, token);
-            await ssl.FlushAsync(token);
-            _totalBytesSent += requestBytes.Length;
-            Dispatcher.Invoke(UpdateBytesLabel);
+                string method = parts[0];
+                string target = parts[1];
 
-            // Read response (with timeout)
-            using var readCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-            readCts.CancelAfter(5_000);
-            int bytesRead = 0;
+                if (method == "CONNECT")
+                {
+                    // Extract host:port from target
+                    string[] hostPort = target.Split(':');
+                    string remoteHost = hostPort[0];
+                    int remotePort = hostPort.Length > 1 ? int.Parse(hostPort[1]) : 443;
+
+                    // Send 200 Connection Established
+                    byte[] response = Encoding.ASCII.GetBytes("HTTP/1.1 200 Connection Established\r\n\r\n");
+                    await clientStream.WriteAsync(response, 0, response.Length, token);
+
+                    // Connect to remote
+                    using TcpClient remote = new TcpClient();
+                    await remote.ConnectAsync(remoteHost, remotePort, token);
+                    NetworkStream remoteStream = remote.GetStream();
+
+                    // If host is throttled, perform SNI splitting on first ClientHello
+                    bool shouldSplit = IsThrottledHost(remoteHost);
+                    if (shouldSplit)
+                    {
+                        await HandleSniSplitting(clientStream, remoteStream, token);
+                    }
+                    else
+                    {
+                        // Simple bidirectional copy
+                        await Task.WhenAll(
+                            clientStream.CopyToAsync(remoteStream, token),
+                            remoteStream.CopyToAsync(clientStream, token)
+                        );
+                    }
+                }
+                else
+                {
+                    // Handle plain HTTP (not needed for HTTPS, but support GET)
+                    using TcpClient remote = new TcpClient();
+                    Uri uri = new Uri(target);
+                    await remote.ConnectAsync(uri.Host, uri.Port != 80 ? uri.Port : 80, token);
+                    NetworkStream remoteStream = remote.GetStream();
+                    // Forward original request
+                    byte[] requestBytes = Encoding.ASCII.GetBytes(request);
+                    await remoteStream.WriteAsync(requestBytes, 0, requestBytes.Length, token);
+                    await Task.WhenAll(
+                        clientStream.CopyToAsync(remoteStream, token),
+                        remoteStream.CopyToAsync(clientStream, token)
+                    );
+                }
+            }
+        }
+
+        private bool IsThrottledHost(string host)
+        {
+            foreach (var h in _throttledHosts)
+            {
+                if (host.Contains(h, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private async Task HandleSniSplitting(NetworkStream clientStream, NetworkStream remoteStream, CancellationToken token)
+        {
+            // Read TLS ClientHello from client
+            byte[] buffer = new byte[8192];
+            int bytesRead = await clientStream.ReadAsync(buffer, 0, buffer.Length, token);
+            if (bytesRead <= 0) return;
+
+            // Check if it's TLS handshake (first byte 0x16)
+            if (buffer[0] != 0x16)
+            {
+                // Not TLS, just forward
+                await remoteStream.WriteAsync(buffer, 0, bytesRead, token);
+                await clientStream.CopyToAsync(remoteStream, token);
+                await remoteStream.CopyToAsync(clientStream, token);
+                return;
+            }
+
+            // Split ClientHello: Send first 1 byte, wait 10ms, send rest
+            await remoteStream.WriteAsync(buffer, 0, 1, token);
+            await Task.Delay(10, token);
+            await remoteStream.WriteAsync(buffer, 1, bytesRead - 1, token);
+
+            // Then bidirectional copy
+            await Task.WhenAll(
+                clientStream.CopyToAsync(remoteStream, token),
+                remoteStream.CopyToAsync(clientStream, token)
+            );
+        }
+
+        private void StopProxy()
+        {
             try
             {
-                bytesRead = await ssl.ReadAsync(responseBuffer, 0, responseBuffer.Length, readCts.Token);
+                SetWindowsProxy(false);
+                _cts?.Cancel();
             }
-            catch (OperationCanceledException) when (!token.IsCancellationRequested)
-            {
-                // Timeout, but connection may still be alive; we'll treat as success if connected
-            }
-
-            if (bytesRead == 0)
-            {
-                throw new IOException("Server closed connection.");
-            }
-
-            // Success! Update UI
-            Dispatcher.Invoke(() =>
-            {
-                SetUIConnected(host);
-                ActionBtn.IsEnabled = true;
-            });
-
-            // Keepalive loop
-            while (!token.IsCancellationRequested && tcp.Connected)
-            {
-                await ssl.WriteAsync(requestBytes, 0, requestBytes.Length, token);
-                await ssl.FlushAsync(token);
-                _totalBytesSent += requestBytes.Length;
-                Dispatcher.Invoke(UpdateBytesLabel);
-
-                try
-                {
-                    using var keepCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                    keepCts.CancelAfter(3_000);
-                    int read = await ssl.ReadAsync(responseBuffer, 0, responseBuffer.Length, keepCts.Token);
-                    if (read == 0) throw new IOException("Server closed connection.");
-                }
-                catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                {
-                    // ignore timeout
-                }
-
-                int interval = GetSelectedInterval() * 1_000;
-                await Task.Delay(interval, token);
-            }
+            catch { }
+            _isRunning = false;
         }
 
-        private void StopConnection()
+        private void SetWindowsProxy(bool enable)
         {
-            try { _cts?.Cancel(); } catch { }
+            const string proxyServer = "127.0.0.1:8080";
+            using RegistryKey? key = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Internet Settings", true);
+            if (key == null) return;
+
+            if (enable)
+            {
+                key.SetValue("ProxyEnable", 1);
+                key.SetValue("ProxyServer", proxyServer);
+                key.SetValue("ProxyOverride", "localhost;127.0.0.1;*.local;<local>");
+            }
+            else
+            {
+                key.SetValue("ProxyEnable", 0);
+                key.DeleteValue("ProxyServer", false);
+            }
+            // Notify Windows of change
+            NativeMethods.InternetSetOption(IntPtr.Zero, 39, IntPtr.Zero, 0);
+            NativeMethods.InternetSetOption(IntPtr.Zero, 37, IntPtr.Zero, 0);
         }
 
         private void SetUIConnecting()
         {
-            _isRunning = true;
             ActionBtn.IsEnabled = false;
-            ActionBtn.Content = "Connecting...";
+            ActionBtn.Content = "Starting...";
             ActionBtn.Background = MakeBrush("#F59E0B");
             HostTextBox.IsEnabled = false;
-            IntervalCombo.IsEnabled = false;
             LoadIndicator.Visibility = Visibility.Visible;
-            SetStatus("Connecting...", "#F59E0B");
+            SetStatus("Starting proxy...", "#F59E0B");
         }
 
-        private void SetUIConnected(string host)
+        private void SetUIConnected(string text)
         {
             ActionBtn.Content = "DISCONNECT";
             ActionBtn.Background = MakeBrush("#DC2626");
-            SetStatus($"Connected → {host}", "#22C55E");
+            ActionBtn.IsEnabled = true;
+            LoadIndicator.Visibility = Visibility.Hidden;
+            SetStatus($"Active: {text}", "#22C55E");
         }
 
         private void SetUIDisconnected()
         {
-            _isRunning = false;
-            ActionBtn.IsEnabled = true;
             ActionBtn.Content = "START";
             ActionBtn.Background = MakeBrush("#16A34A");
+            ActionBtn.IsEnabled = true;
             HostTextBox.IsEnabled = true;
-            IntervalCombo.IsEnabled = true;
             LoadIndicator.Visibility = Visibility.Hidden;
             SetStatus("Disconnected", "#64748B");
-            BytesLabel.Text = "Data Sent: —";
         }
 
         private void SetStatus(string message, string hexColor)
@@ -320,22 +298,7 @@ namespace NetworkBooster
             StatusText.Foreground = MakeBrush(hexColor);
         }
 
-        private void UpdateBytesLabel()
-        {
-            long b = _totalBytesSent;
-            BytesLabel.Text = b < 1_024
-                ? $"Data Sent: {b} B"
-                : b < 1_048_576
-                    ? $"Data Sent: {b / 1024.0:F1} KB"
-                    : $"Data Sent: {b / 1_048_576.0:F2} MB";
-        }
-
-        private int GetSelectedInterval() =>
-            Dispatcher.Invoke(() =>
-            {
-                int i = IntervalCombo.SelectedIndex;
-                return (i >= 0 && i < _intervals.Length) ? _intervals[i] : 10;
-            });
+        private int GetSelectedInterval() => 10;
 
         private static SolidColorBrush MakeBrush(string hex) =>
             (SolidColorBrush)new BrushConverter().ConvertFrom(hex)!;
@@ -347,7 +310,6 @@ namespace NetworkBooster
                 const string runKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
                 using RegistryKey? rk = Registry.CurrentUser.OpenSubKey(runKey, true);
                 if (rk == null) return;
-
                 if (AutoStartCheckBox.IsChecked == true)
                 {
                     string exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
@@ -368,34 +330,18 @@ namespace NetworkBooster
                 const string runKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
                 using RegistryKey? run = Registry.CurrentUser.OpenSubKey(runKey);
                 AutoStartCheckBox.IsChecked = run?.GetValue(APP_NAME) != null;
-
-                using RegistryKey? s = Registry.CurrentUser.OpenSubKey(REG_PATH);
-                if (s != null)
-                {
-                    string? savedHost = s.GetValue("Host") as string;
-                    if (!string.IsNullOrEmpty(savedHost))
-                        HostTextBox.Text = savedHost;
-
-                    int idx = Convert.ToInt32(s.GetValue("Interval", 1));
-                    IntervalCombo.SelectedIndex = Math.Clamp(idx, 0, _intervals.Length - 1);
-                }
             }
-            catch
-            {
-                IntervalCombo.SelectedIndex = 1;
-            }
+            catch { }
         }
 
         private void SaveSettings()
         {
-            try
-            {
-                using RegistryKey? s = Registry.CurrentUser.CreateSubKey(REG_PATH);
-                if (s == null) return;
-                s.SetValue("Host", HostTextBox.Text);
-                s.SetValue("Interval", IntervalCombo.SelectedIndex);
-            }
-            catch { }
         }
+    }
+
+    internal static class NativeMethods
+    {
+        [System.Runtime.InteropServices.DllImport("wininet.dll", SetLastError = true)]
+        public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
     }
 }
