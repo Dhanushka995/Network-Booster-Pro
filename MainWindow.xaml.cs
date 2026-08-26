@@ -1,10 +1,6 @@
 using System;
-using System.Collections.Generic;
-using System.IO;
 using System.Net;
-using System.Net.Security;
 using System.Net.Sockets;
-using System.Security.Authentication;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -92,7 +88,8 @@ namespace NetworkBooster
                 try
                 {
                     SetWindowsProxy(true);
-                    await Task.Run(() => StartProxyServer(_cts.Token));
+                    // Start proxy server in background (don't await)
+                    _ = Task.Run(() => StartProxyServer(_cts.Token), _cts.Token);
                     SetUIConnected("SNI Splitting Proxy");
                 }
                 catch (Exception ex)
@@ -115,8 +112,16 @@ namespace NetworkBooster
             listener.Start();
             while (!token.IsCancellationRequested)
             {
-                TcpClient client = listener.AcceptTcpClient();
-                _ = Task.Run(() => HandleClient(client, token), token);
+                try
+                {
+                    TcpClient client = listener.AcceptTcpClient();
+                    _ = Task.Run(() => HandleClient(client, token), token);
+                }
+                catch (SocketException)
+                {
+                    // listener stopped
+                    break;
+                }
             }
             listener.Stop();
         }
@@ -126,7 +131,6 @@ namespace NetworkBooster
             using (client)
             {
                 NetworkStream clientStream = client.GetStream();
-                // Read initial request (CONNECT or plain HTTP)
                 byte[] buffer = new byte[8192];
                 int bytesRead = await clientStream.ReadAsync(buffer, 0, buffer.Length, token);
                 if (bytesRead <= 0) return;
@@ -143,29 +147,23 @@ namespace NetworkBooster
 
                 if (method == "CONNECT")
                 {
-                    // Extract host:port from target
                     string[] hostPort = target.Split(':');
                     string remoteHost = hostPort[0];
                     int remotePort = hostPort.Length > 1 ? int.Parse(hostPort[1]) : 443;
 
-                    // Send 200 Connection Established
                     byte[] response = Encoding.ASCII.GetBytes("HTTP/1.1 200 Connection Established\r\n\r\n");
                     await clientStream.WriteAsync(response, 0, response.Length, token);
 
-                    // Connect to remote
                     using TcpClient remote = new TcpClient();
                     await remote.ConnectAsync(remoteHost, remotePort, token);
                     NetworkStream remoteStream = remote.GetStream();
 
-                    // If host is throttled, perform SNI splitting on first ClientHello
-                    bool shouldSplit = IsThrottledHost(remoteHost);
-                    if (shouldSplit)
+                    if (IsThrottledHost(remoteHost))
                     {
                         await HandleSniSplitting(clientStream, remoteStream, token);
                     }
                     else
                     {
-                        // Simple bidirectional copy
                         await Task.WhenAll(
                             clientStream.CopyToAsync(remoteStream, token),
                             remoteStream.CopyToAsync(clientStream, token)
@@ -174,12 +172,11 @@ namespace NetworkBooster
                 }
                 else
                 {
-                    // Handle plain HTTP (not needed for HTTPS, but support GET)
+                    // Plain HTTP (rarely used)
                     using TcpClient remote = new TcpClient();
                     Uri uri = new Uri(target);
                     await remote.ConnectAsync(uri.Host, uri.Port != 80 ? uri.Port : 80, token);
                     NetworkStream remoteStream = remote.GetStream();
-                    // Forward original request
                     byte[] requestBytes = Encoding.ASCII.GetBytes(request);
                     await remoteStream.WriteAsync(requestBytes, 0, requestBytes.Length, token);
                     await Task.WhenAll(
@@ -202,27 +199,23 @@ namespace NetworkBooster
 
         private async Task HandleSniSplitting(NetworkStream clientStream, NetworkStream remoteStream, CancellationToken token)
         {
-            // Read TLS ClientHello from client
             byte[] buffer = new byte[8192];
             int bytesRead = await clientStream.ReadAsync(buffer, 0, buffer.Length, token);
             if (bytesRead <= 0) return;
 
-            // Check if it's TLS handshake (first byte 0x16)
             if (buffer[0] != 0x16)
             {
-                // Not TLS, just forward
                 await remoteStream.WriteAsync(buffer, 0, bytesRead, token);
                 await clientStream.CopyToAsync(remoteStream, token);
                 await remoteStream.CopyToAsync(clientStream, token);
                 return;
             }
 
-            // Split ClientHello: Send first 1 byte, wait 10ms, send rest
+            // Split ClientHello: send first byte, wait, send rest
             await remoteStream.WriteAsync(buffer, 0, 1, token);
             await Task.Delay(10, token);
             await remoteStream.WriteAsync(buffer, 1, bytesRead - 1, token);
 
-            // Then bidirectional copy
             await Task.WhenAll(
                 clientStream.CopyToAsync(remoteStream, token),
                 remoteStream.CopyToAsync(clientStream, token)
@@ -258,7 +251,6 @@ namespace NetworkBooster
                 key.SetValue("ProxyEnable", 0);
                 key.DeleteValue("ProxyServer", false);
             }
-            // Notify Windows of change
             NativeMethods.InternetSetOption(IntPtr.Zero, 39, IntPtr.Zero, 0);
             NativeMethods.InternetSetOption(IntPtr.Zero, 37, IntPtr.Zero, 0);
         }
@@ -268,7 +260,6 @@ namespace NetworkBooster
             ActionBtn.IsEnabled = false;
             ActionBtn.Content = "Starting...";
             ActionBtn.Background = MakeBrush("#F59E0B");
-            HostTextBox.IsEnabled = false;
             LoadIndicator.Visibility = Visibility.Visible;
             SetStatus("Starting proxy...", "#F59E0B");
         }
@@ -287,7 +278,6 @@ namespace NetworkBooster
             ActionBtn.Content = "START";
             ActionBtn.Background = MakeBrush("#16A34A");
             ActionBtn.IsEnabled = true;
-            HostTextBox.IsEnabled = true;
             LoadIndicator.Visibility = Visibility.Hidden;
             SetStatus("Disconnected", "#64748B");
         }
@@ -297,8 +287,6 @@ namespace NetworkBooster
             StatusText.Text = $"Status: {message}";
             StatusText.Foreground = MakeBrush(hexColor);
         }
-
-        private int GetSelectedInterval() => 10;
 
         private static SolidColorBrush MakeBrush(string hex) =>
             (SolidColorBrush)new BrushConverter().ConvertFrom(hex)!;
@@ -336,6 +324,7 @@ namespace NetworkBooster
 
         private void SaveSettings()
         {
+            // Not used in proxy version
         }
     }
 
