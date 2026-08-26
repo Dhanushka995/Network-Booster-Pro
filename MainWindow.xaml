@@ -1,7 +1,7 @@
 <Window x:Class="NetworkBooster.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Network Booster Pro" Height="450" Width="370"
+        Title="Network Booster Pro" Height="520" Width="370"
         WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="#0F172A"
         StateChanged="Window_StateChanged" Closing="Window_Closing">
