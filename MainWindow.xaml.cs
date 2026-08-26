@@ -15,7 +15,6 @@ namespace NetworkBooster
         private const string APP_NAME = "NetworkBoosterPro";
         private const string REG_PATH = @"Software\NetworkBoosterPro";
         private const int PROXY_PORT = 8080;
-        private const string SPOOF_HOST = "selfcare.hutch.lk";
 
         private bool _isRunning = false;
         private CancellationTokenSource? _cts;
@@ -61,7 +60,7 @@ namespace NetworkBooster
                 {
                     _trayIcon.Visible = true;
                     _trayIcon.ShowBalloonTip(2000, "Network Booster Pro",
-                        _isRunning ? "Proxy running — Host spoofing active!" : "Running in background.",
+                        _isRunning ? "Proxy running" : "Running in background.",
                         System.Windows.Forms.ToolTipIcon.Info);
                 }
             }
@@ -84,7 +83,7 @@ namespace NetworkBooster
                 {
                     SetWindowsProxy(true);
                     _ = Task.Run(() => StartProxyServer(_cts.Token), _cts.Token);
-                    SetUIConnected("Host Spoofing Proxy");
+                    SetUIConnected("Forward Proxy");
                 }
                 catch (Exception ex)
                 {
@@ -151,20 +150,21 @@ namespace NetworkBooster
                     await remote.ConnectAsync(remoteHost, remotePort, token);
                     NetworkStream remoteStream = remote.GetStream();
 
-                    // Host spoofing: intercept TLS ClientHello and replace SNI
-                    await HandleSniSpoofing(clientStream, remoteStream, remoteHost, token);
+                    // Simple bidirectional copy
+                    await Task.WhenAll(
+                        clientStream.CopyToAsync(remoteStream, token),
+                        remoteStream.CopyToAsync(clientStream, token)
+                    );
                 }
                 else
                 {
-                    // Plain HTTP: rewrite Host header
+                    // Plain HTTP forward
                     using TcpClient remote = new TcpClient();
                     Uri uri = new Uri(target);
                     await remote.ConnectAsync(uri.Host, uri.Port != 80 ? uri.Port : 80, token);
                     NetworkStream remoteStream = remote.GetStream();
 
-                    // Replace Host header with SPOOF_HOST
-                    string newRequest = request.Replace($"Host: {uri.Host}", $"Host: {SPOOF_HOST}");
-                    byte[] requestBytes = Encoding.ASCII.GetBytes(newRequest);
+                    byte[] requestBytes = Encoding.ASCII.GetBytes(request);
                     await remoteStream.WriteAsync(requestBytes, 0, requestBytes.Length, token);
 
                     await Task.WhenAll(
@@ -173,53 +173,6 @@ namespace NetworkBooster
                     );
                 }
             }
-        }
-
-        private async Task HandleSniSpoofing(NetworkStream clientStream, NetworkStream remoteStream, string remoteHost, CancellationToken token)
-        {
-            byte[] buffer = new byte[8192];
-            int bytesRead = await clientStream.ReadAsync(buffer, 0, buffer.Length, token);
-            if (bytesRead <= 0) return;
-
-            if (buffer[0] != 0x16) // not TLS handshake
-            {
-                await remoteStream.WriteAsync(buffer, 0, bytesRead, token);
-                await clientStream.CopyToAsync(remoteStream, token);
-                await remoteStream.CopyToAsync(clientStream, token);
-                return;
-            }
-
-            // Simple SNI spoof: replace remoteHost with SPOOF_HOST in ClientHello bytes
-            byte[] remoteHostBytes = Encoding.ASCII.GetBytes(remoteHost);
-            byte[] spoofHostBytes = Encoding.ASCII.GetBytes(SPOOF_HOST);
-            int index = FindBytes(buffer, remoteHostBytes);
-            if (index >= 0)
-            {
-                // Replace bytes
-                Array.Copy(spoofHostBytes, 0, buffer, index, spoofHostBytes.Length);
-                // Pad with zeros if lengths differ
-                for (int i = index + spoofHostBytes.Length; i < index + remoteHostBytes.Length; i++)
-                    buffer[i] = 0;
-            }
-
-            await remoteStream.WriteAsync(buffer, 0, bytesRead, token);
-            await clientStream.CopyToAsync(remoteStream, token);
-            await remoteStream.CopyToAsync(clientStream, token);
-        }
-
-        private int FindBytes(byte[] haystack, byte[] needle)
-        {
-            if (needle.Length == 0) return -1;
-            for (int i = 0; i <= haystack.Length - needle.Length; i++)
-            {
-                bool found = true;
-                for (int j = 0; j < needle.Length; j++)
-                {
-                    if (haystack[i + j] != needle[j]) { found = false; break; }
-                }
-                if (found) return i;
-            }
-            return -1;
         }
 
         private void StopProxy()
