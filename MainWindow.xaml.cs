@@ -17,7 +17,14 @@ namespace NetworkBooster
         private const string APP_NAME    = "NetworkBoosterPro";
         private const string REG_PATH    = @"Software\NetworkBoosterPro";
         private const int    TARGET_PORT = 443;
-        private const string DEFAULT_PATH = "/hutch_2_0/";
+
+        // Possible endpoints to try (order matters: base first, then dashboard)
+        private readonly string[] _endpoints = new string[]
+        {
+            "/hutch_2_0/",
+            "/hutch_2_0/capp/Dashboard/getConnectionDetails",
+            "/hutch_2_0/capp/Dashboard/readDashboardData"
+        };
 
         private readonly int[] _intervals = { 5, 10, 15, 30 };
 
@@ -94,36 +101,17 @@ namespace NetworkBooster
             if (!_isRunning)
             {
                 string input = HostTextBox.Text.Trim();
-
                 if (string.IsNullOrEmpty(input))
                 {
                     SetStatus("Please enter a valid host!", "#EF4444");
                     return;
                 }
 
-                string host, path;
-                if (input.Contains("://"))
-                {
-                    var uri = new Uri(input);
-                    host = uri.Host;
-                    path = uri.AbsolutePath;
-                    if (string.IsNullOrEmpty(path)) path = "/";
-                }
-                else if (input.Contains("/"))
-                {
-                    int idx = input.IndexOf('/');
-                    host = input.Substring(0, idx);
-                    path = input.Substring(idx);
-                    if (string.IsNullOrEmpty(path)) path = "/";
-                }
-                else
-                {
-                    host = input;
-                    path = DEFAULT_PATH;
-                }
+                // We'll ignore path input now; use our endpoint list
+                string host = input.Contains("://") ? new Uri(input).Host : input.Split('/')[0];
 
                 SaveSettings();
-                _ = StartConnectionLoop(host, path);
+                _ = StartConnectionLoop(host);
             }
             else
             {
@@ -132,7 +120,7 @@ namespace NetworkBooster
             }
         }
 
-        private async Task StartConnectionLoop(string host, string path)
+        private async Task StartConnectionLoop(string host)
         {
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
@@ -153,7 +141,33 @@ namespace NetworkBooster
 
                 try
                 {
-                    await ConnectAndKeepaliveAsync(host, path, token);
+                    // Try each endpoint in order, first one that works wins
+                    string? workingPath = null;
+                    foreach (var path in _endpoints)
+                    {
+                        if (token.IsCancellationRequested) break;
+                        try
+                        {
+                            Dispatcher.Invoke(() => SetStatus($"Trying {path}...", "#F59E0B"));
+                            await ConnectAndKeepaliveAsync(host, path, token);
+                            // If ConnectAndKeepaliveAsync returns normally, server closed connection; try next
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw; // user cancelled
+                        }
+                        catch (Exception ex)
+                        {
+                            Dispatcher.Invoke(() => SetStatus($"Failed {path}: {ex.Message}", "#EF4444"));
+                            continue; // try next endpoint
+                        }
+                    }
+
+                    // If no endpoint worked, wait and retry all again
+                    if (workingPath == null)
+                    {
+                        Dispatcher.Invoke(() => SetStatus("No endpoint worked, retrying...", "#F59E0B"));
+                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -166,10 +180,10 @@ namespace NetworkBooster
                         SetStatus($"Error — {ex.Message}", "#EF4444");
                         ActionBtn.IsEnabled = true;
                     });
-
-                    try { await Task.Delay(5_000, token); }
-                    catch (OperationCanceledException) { break; }
                 }
+
+                try { await Task.Delay(5_000, token); }
+                catch (OperationCanceledException) { break; }
             }
 
             Dispatcher.Invoke(SetUIDisconnected);
@@ -177,21 +191,14 @@ namespace NetworkBooster
 
         private async Task ConnectAndKeepaliveAsync(string host, string path, CancellationToken token)
         {
-            Dispatcher.Invoke(() => SetStatus($"Connecting to {host}...", "#F59E0B"));
-
             using var tcp = new TcpClient();
             tcp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
 
             using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(token);
             connectCts.CancelAfter(15_000);
-
             await tcp.ConnectAsync(host, TARGET_PORT, connectCts.Token);
 
-            Dispatcher.Invoke(() => SetStatus("Securing connection (TLS)...", "#F59E0B"));
-
-            // FIX: Remove callback from constructor, keep only in options
             using var ssl = new SslStream(tcp.GetStream(), false);
-
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
             {
                 TargetHost = host,
@@ -199,47 +206,70 @@ namespace NetworkBooster
                 RemoteCertificateValidationCallback = (_, _, _, _) => true
             }, token);
 
-            _reconnectAttempts = 0;
+            // Build request; if path contains "Dashboard" use POST with empty JSON, else GET
+            bool isPost = path.Contains("Dashboard");
+            string method = isPost ? "POST" : "GET";
+            string requestBody = isPost ? "{}" : "";
+            string httpRequest = $"{method} {path} HTTP/1.1\r\n" +
+                                 $"Host: {host}\r\n" +
+                                 $"Connection: keep-alive\r\n" +
+                                 $"User-Agent: HutchOneApp/3.0 Android\r\n" +
+                                 $"Accept: */*\r\n" +
+                                 (isPost ? $"Content-Type: application/json\r\nContent-Length: {Encoding.UTF8.GetByteCount(requestBody)}\r\n" : "") +
+                                 $"\r\n" + requestBody;
+
+            byte[] requestBytes = Encoding.UTF8.GetBytes(httpRequest);
+            byte[] responseBuffer = new byte[8192];
+
+            // Send first request
+            await ssl.WriteAsync(requestBytes, 0, requestBytes.Length, token);
+            await ssl.FlushAsync(token);
+            _totalBytesSent += requestBytes.Length;
+            Dispatcher.Invoke(UpdateBytesLabel);
+
+            // Read response (with timeout)
+            using var readCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            readCts.CancelAfter(5_000);
+            int bytesRead = 0;
+            try
+            {
+                bytesRead = await ssl.ReadAsync(responseBuffer, 0, responseBuffer.Length, readCts.Token);
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                // Timeout, but connection may still be alive; we'll treat as success if connected
+            }
+
+            if (bytesRead == 0)
+            {
+                throw new IOException("Server closed connection.");
+            }
+
+            // Success! Update UI
             Dispatcher.Invoke(() =>
             {
                 SetUIConnected(host);
                 ActionBtn.IsEnabled = true;
             });
 
-            string httpRequest =
-                $"GET {path} HTTP/1.1\r\n" +
-                $"Host: {host}\r\n" +
-                $"Connection: keep-alive\r\n" +
-                $"User-Agent: HutchOneApp/3.0 Android\r\n" +
-                $"Accept: */*\r\n" +
-                $"\r\n";
-
-            byte[] requestBytes = Encoding.UTF8.GetBytes(httpRequest);
-            byte[] responseBuffer = new byte[8192];
-
+            // Keepalive loop
             while (!token.IsCancellationRequested && tcp.Connected)
             {
                 await ssl.WriteAsync(requestBytes, 0, requestBytes.Length, token);
                 await ssl.FlushAsync(token);
-
                 _totalBytesSent += requestBytes.Length;
                 Dispatcher.Invoke(UpdateBytesLabel);
 
                 try
                 {
-                    using var readCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                    readCts.CancelAfter(3_000);
-
-                    int bytesRead = await ssl.ReadAsync(responseBuffer, 0, responseBuffer.Length, readCts.Token);
-
-                    if (bytesRead == 0)
-                    {
-                        throw new IOException("Server closed connection.");
-                    }
+                    using var keepCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    keepCts.CancelAfter(3_000);
+                    int read = await ssl.ReadAsync(responseBuffer, 0, responseBuffer.Length, keepCts.Token);
+                    if (read == 0) throw new IOException("Server closed connection.");
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    // Read timeout is fine
+                    // ignore timeout
                 }
 
                 int interval = GetSelectedInterval() * 1_000;
